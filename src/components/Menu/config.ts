@@ -114,7 +114,7 @@ const config: (t: ContextApi['t']) => MenuEntry[] = (t) => [
       },
       {
         label: t('Voting'),
-        href: 'https://voting.pancakeswap.finance',
+        href: '/voting',
       },
       {
         label: t('Github'),
