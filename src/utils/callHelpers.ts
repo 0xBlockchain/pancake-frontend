@@ -1,7 +1,7 @@
 import BigNumber from 'bignumber.js'
 import { DEFAULT_GAS_LIMIT, DEFAULT_TOKEN_DECIMAL } from 'config'
 import { ethers } from 'ethers'
-import { Pair, TokenAmount, Token } from '@pancakeswap-libs/sdk'
+import { Pair, TokenAmount, Token } from '@pancakeswap/sdk'
 import { getLpContract, getMasterchefContract } from 'utils/contractHelpers'
 import farms from 'config/constants/farms'
 import { getAddress, getCakeAddress } from 'utils/addressHelpers'
