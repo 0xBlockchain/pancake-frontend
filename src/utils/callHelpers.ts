@@ -2,11 +2,18 @@ import BigNumber from 'bignumber.js'
 import { DEFAULT_GAS_LIMIT, DEFAULT_TOKEN_DECIMAL } from 'config'
 import { ethers } from 'ethers'
 import { Pair, TokenAmount, Token } from '@pancakeswap/sdk'
-import { getBep20Contract, getLpContract, getMasterchefContract, getSouschefV2Contract } from 'utils/contractHelpers'
+import {
+  getBep20Contract,
+  getLpContract,
+  getMasterchefContract,
+  getSouschefV2Contract,
+  getCakeVaultContract,
+} from 'utils/contractHelpers'
 import farms from 'config/constants/farms'
 import { getAddress, getCakeAddress } from 'utils/addressHelpers'
 import tokens from 'config/constants/tokens'
 import pools from 'config/constants/pools'
+import { convertSharesToCake } from 'views/Pools/helpers'
 import { getWeb3WithArchivedNodeProvider } from './web3'
 import { getBalanceAmount } from './formatBalance'
 import { BIG_TEN, BIG_ZERO } from './bigNumber'
@@ -238,6 +245,22 @@ export const getCakeBalance = async (account: string, block?: number) => {
     const bep20Contract = getBep20Contract(getCakeAddress(), archivedWeb3)
     const cakeBalance = await bep20Contract.methods.balanceOf(account).call(undefined, block)
     return getBalanceAmount(new BigNumber(cakeBalance))
+  } catch (error) {
+    console.error('Error fetching cake balance:', error)
+    return BIG_ZERO
+  }
+}
+
+export const getUserCakeVaultBalance = async (account: string, block?: number) => {
+  try {
+    const archivedWeb3 = getWeb3WithArchivedNodeProvider()
+    const cakeVaultContract = getCakeVaultContract(archivedWeb3)
+    const userInfo = await cakeVaultContract.methods.userInfo(account).call(undefined, block)
+    const pricePerFullShare = await cakeVaultContract.methods.getPricePerFullShare().call(undefined, block)
+    const userShare = new BigNumber(userInfo.shares)
+    const sharePriceAsBigNumber = new BigNumber(pricePerFullShare)
+    const { cakeAsBigNumber } = convertSharesToCake(userShare, sharePriceAsBigNumber)
+    return cakeAsBigNumber
   } catch (error) {
     console.error('Error fetching cake balance:', error)
     return BIG_ZERO
