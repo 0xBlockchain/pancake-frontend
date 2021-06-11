@@ -1,22 +1,12 @@
 import BigNumber from 'bignumber.js'
 import { DEFAULT_GAS_LIMIT, DEFAULT_TOKEN_DECIMAL } from 'config'
 import { ethers } from 'ethers'
-import { Pair, TokenAmount, Token } from '@pancakeswap/sdk'
-import {
-  getBep20Contract,
-  getLpContract,
-  getMasterchefContract,
-  getSouschefV2Contract,
-  getCakeVaultContract,
-} from 'utils/contractHelpers'
-import farms from 'config/constants/farms'
-import { getAddress, getCakeAddress } from 'utils/addressHelpers'
-import tokens from 'config/constants/tokens'
+import { getAddress } from 'utils/addressHelpers'
 import pools from 'config/constants/pools'
-import { convertSharesToCake } from 'views/Pools/helpers'
+import sousChefABI from 'config/abi/sousChef.json'
 import { getWeb3WithArchivedNodeProvider } from './web3'
-import { getBalanceAmount } from './formatBalance'
 import { BIG_TEN, BIG_ZERO } from './bigNumber'
+import { multicallv2, MultiCallV2Result } from './multicall'
 
 export const approve = async (lpContract, masterChefContract, account) => {
   return lpContract.methods
@@ -136,133 +126,49 @@ export const soushHarvestBnb = async (sousChefContract, account) => {
     })
 }
 
-const chainId = parseInt(process.env.REACT_APP_CHAIN_ID, 10)
-const cakeBnbPid = 251
-const cakeBnbFarm = farms.find((farm) => farm.pid === cakeBnbPid)
-
-const CAKE_TOKEN = new Token(chainId, getCakeAddress(), 18)
-const WBNB_TOKEN = new Token(chainId, tokens.wbnb.address[chainId], 18)
-const CAKE_BNB_TOKEN = new Token(chainId, getAddress(cakeBnbFarm.lpAddresses), 18)
-
-/**
- * Returns the total CAKE staked in the CAKE-BNB LP
- */
-export const getUserStakeInCakeBnbLp = async (account: string, block?: number) => {
-  try {
-    const archivedWeb3 = getWeb3WithArchivedNodeProvider()
-    const masterContract = getMasterchefContract(archivedWeb3)
-    const cakeBnbContract = getLpContract(getAddress(cakeBnbFarm.lpAddresses), archivedWeb3)
-    const totalSupplyLP = await cakeBnbContract.methods.totalSupply().call(undefined, block)
-    const reservesLP = await cakeBnbContract.methods.getReserves().call(undefined, block)
-    const cakeBnbBalance = await masterContract.methods.userInfo(cakeBnbPid, account).call(undefined, block)
-
-    const pair: Pair = new Pair(
-      new TokenAmount(CAKE_TOKEN, reservesLP._reserve0.toString()),
-      new TokenAmount(WBNB_TOKEN, reservesLP._reserve1.toString()),
-    )
-    const cakeLPBalance = pair.getLiquidityValue(
-      pair.token0,
-      new TokenAmount(CAKE_BNB_TOKEN, totalSupplyLP.toString()),
-      new TokenAmount(CAKE_BNB_TOKEN, cakeBnbBalance.amount.toString()),
-      false,
-    )
-
-    return new BigNumber(cakeLPBalance.toSignificant(18))
-  } catch (error) {
-    console.error(`CAKE-BNB LP error: ${error}`)
-    return BIG_ZERO
+export const getActivePools = async (block?: number) => {
+  const archivedWeb3 = getWeb3WithArchivedNodeProvider()
+  const eligiblePools = pools
+    .filter((pool) => pool.sousId !== 0)
+    .filter((pool) => pool.isFinished === false || pool.isFinished === undefined)
+  const blockNumber = block || (await archivedWeb3.eth.getBlockNumber())
+  const multiCallOptions = {
+    web3: archivedWeb3,
+    requireSuccess: false,
+    blockNumber,
   }
-}
 
-/**
- * Gets the cake staked in the main pool
- */
-export const getUserStakeInCakePool = async (account: string, block?: number) => {
-  try {
-    const archivedWeb3 = getWeb3WithArchivedNodeProvider()
-    const masterContract = getMasterchefContract(archivedWeb3)
-    const response = await masterContract.methods.userInfo(0, account).call(undefined, block)
+  const startBlocks = (await multicallv2(
+    sousChefABI,
+    eligiblePools.map(({ contractAddress }) => {
+      return {
+        address: getAddress(contractAddress),
+        name: 'startBlock',
+      }
+    }),
+    multiCallOptions,
+  )) as MultiCallV2Result<BigNumber>[]
+  const endBlocks = (await multicallv2(
+    sousChefABI,
+    eligiblePools.map(({ contractAddress }) => {
+      return {
+        address: getAddress(contractAddress),
+        name: 'bonusEndBlock',
+      }
+    }),
+    multiCallOptions,
+  )) as MultiCallV2Result<BigNumber>[]
 
-    return getBalanceAmount(new BigNumber(response.amount))
-  } catch (error) {
-    console.error('Error getting stake in CAKE pool', error)
-    return BIG_ZERO
-  }
-}
+  return eligiblePools.reduce((accum, pool, index) => {
+    const { data: startBlockData } = startBlocks[index]
+    const { data: endBlockData } = endBlocks[index]
+    const startBlock = new BigNumber(startBlockData[0]._hex)
+    const endBlock = new BigNumber(endBlockData[0]._hex)
 
-const getUserStakeInPool = async (sousId: number, account: string, block?: number) => {
-  try {
-    const archivedWeb3 = getWeb3WithArchivedNodeProvider()
-    const sousChefV2Contract = getSouschefV2Contract(sousId, archivedWeb3)
-    const [currentBlock, startBlockResponse, endBlockResponse] = await Promise.all([
-      archivedWeb3.eth.getBlockNumber(),
-      sousChefV2Contract.methods.startBlock().call(),
-      sousChefV2Contract.methods.bonusEndBlock().call(),
-    ])
-    const blockNumber = block || currentBlock
-    const startBlock = new BigNumber(startBlockResponse)
-    const endBlock = new BigNumber(endBlockResponse)
-
-    // Bail out if pool was not active during the supplied block
     if (startBlock.gt(blockNumber) || endBlock.lt(blockNumber)) {
-      return BIG_ZERO
+      return accum
     }
 
-    const userInfo = await sousChefV2Contract.methods.userInfo(account).call(undefined, blockNumber)
-    return new BigNumber(userInfo.amount)
-  } catch (error) {
-    return BIG_ZERO
-  }
-}
-
-/**
- * Returns total staked value of active pools
- */
-export const getUserStakeInPools = async (account: string, block?: number) => {
-  try {
-    const eligiblePools = pools
-      .filter((pool) => pool.sousId !== 0)
-      .filter((pool) => pool.isFinished === false || pool.isFinished === undefined)
-    const balances = await Promise.all(eligiblePools.map(({ sousId }) => getUserStakeInPool(sousId, account, block)))
-
-    return getBalanceAmount(
-      balances.reduce((accum, balance) => {
-        return accum.plus(balance)
-      }, new BigNumber(0)),
-    )
-  } catch (error) {
-    console.error('Error fetching staked values:', error)
-    return BIG_ZERO
-  }
-}
-
-/**
- * One-time check of wallet's cake balance
- */
-export const getCakeBalance = async (account: string, block?: number) => {
-  try {
-    const archivedWeb3 = getWeb3WithArchivedNodeProvider()
-    const bep20Contract = getBep20Contract(getCakeAddress(), archivedWeb3)
-    const cakeBalance = await bep20Contract.methods.balanceOf(account).call(undefined, block)
-    return getBalanceAmount(new BigNumber(cakeBalance))
-  } catch (error) {
-    console.error('Error fetching cake balance:', error)
-    return BIG_ZERO
-  }
-}
-
-export const getUserCakeVaultBalance = async (account: string, block?: number) => {
-  try {
-    const archivedWeb3 = getWeb3WithArchivedNodeProvider()
-    const cakeVaultContract = getCakeVaultContract(archivedWeb3)
-    const userInfo = await cakeVaultContract.methods.userInfo(account).call(undefined, block)
-    const pricePerFullShare = await cakeVaultContract.methods.getPricePerFullShare().call(undefined, block)
-    const userShare = new BigNumber(userInfo.shares)
-    const sharePriceAsBigNumber = new BigNumber(pricePerFullShare)
-    const { cakeAsBigNumber } = convertSharesToCake(userShare, sharePriceAsBigNumber)
-    return cakeAsBigNumber
-  } catch (error) {
-    console.error('Error fetching cake balance:', error)
-    return BIG_ZERO
-  }
+    return [...accum, pool]
+  }, [])
 }
